@@ -19,6 +19,15 @@ import time
 import psutil
 from typing import Any, Dict, List
 from contextlib import contextmanager
+from datetime import datetime
+
+# HDF5 imports (optional)
+try:
+    import h5py
+    HDF5_AVAILABLE = True
+except ImportError:
+    HDF5_AVAILABLE = False
+    print("HDF5 not available. Install with: pip install h5py")
 
 # MLflow imports (optional)
 try:
@@ -76,6 +85,16 @@ parser.add_argument(
     help=(
         "Save masks as COCO RLEs in a single json instead of as a folder of PNGs. "
         "Requires pycocotools."
+    ),
+)
+
+parser.add_argument(
+    "--hdf5-output",
+    action="store_true", 
+    help=(
+        "Save everything in a single HDF5 file (.h5) containing masks, metadata, "
+        "original image, and visualization. This allows post-processing without "
+        "rerunning segmentation. Requires h5py."
     ),
 )
 
@@ -510,6 +529,166 @@ def write_masks_to_folder(masks: List[Dict[str, Any]], path: str) -> None:
     return
 
 
+def write_hdf5_output(image, masks, viz_image, args, image_path, performance_metrics=None):
+    """
+    Write all segmentation data to a single HDF5 file.
+    
+    Structure:
+    /metadata/
+        - creation_time
+        - image_path
+        - model_type
+        - amg_parameters
+        - performance_metrics (optional)
+    /image/
+        - original (RGB image array)
+        - height, width, channels as attributes
+    /masks/
+        - segmentations (3D array: [mask_id, height, width])
+        - mask_metadata (structured array with all mask properties)
+    /visualization/
+        - image (RGBA visualization image)
+    """
+    if not HDF5_AVAILABLE:
+        print("Warning: HDF5 output requested but h5py is not installed.")
+        return False
+    
+    base = os.path.basename(image_path)
+    base = os.path.splitext(base)[0]
+    output_file = os.path.join(args.output, f"{base}.h5")
+    
+    try:
+        with h5py.File(output_file, 'w') as f:
+            # === METADATA GROUP ===
+            meta_group = f.create_group('metadata')
+            meta_group.attrs['creation_time'] = datetime.now().isoformat()
+            meta_group.attrs['image_path'] = image_path
+            meta_group.attrs['model_type'] = args.model_type
+            meta_group.attrs['checkpoint'] = args.checkpoint
+            meta_group.attrs['device'] = args.device
+            
+            # AMG parameters
+            amg_kwargs = get_amg_kwargs(args)
+            for key, value in amg_kwargs.items():
+                if value is not None:
+                    meta_group.attrs[f'amg_{key}'] = value
+            
+            # Performance metrics if available
+            if performance_metrics:
+                perf_group = meta_group.create_group('performance')
+                for metric_name, metric_data in performance_metrics.items():
+                    if isinstance(metric_data, dict):
+                        metric_subgroup = perf_group.create_group(metric_name)
+                        for sub_key, value in metric_data.items():
+                            metric_subgroup.attrs[sub_key] = value
+                    else:
+                        perf_group.attrs[metric_name] = metric_data
+            
+            # === IMAGE GROUP ===
+            img_group = f.create_group('image')
+            img_dataset = img_group.create_dataset(
+                'original', 
+                data=image,
+                compression='gzip',
+                compression_opts=6
+            )
+            img_dataset.attrs['height'] = image.shape[0]
+            img_dataset.attrs['width'] = image.shape[1] 
+            img_dataset.attrs['channels'] = image.shape[2]
+            img_dataset.attrs['dtype'] = str(image.dtype)
+            
+            # === MASKS GROUP ===
+            masks_group = f.create_group('masks')
+            
+            # Extract segmentations and create 3D array
+            if isinstance(masks[0], dict):
+                segmentations = np.array([mask["segmentation"] for mask in masks])
+                
+                # Create structured array for metadata
+                mask_fields = [
+                    ('id', 'i4'),
+                    ('area', 'f8'),
+                    ('bbox_x', 'f8'),
+                    ('bbox_y', 'f8'), 
+                    ('bbox_w', 'f8'),
+                    ('bbox_h', 'f8'),
+                    ('point_x', 'f8'),
+                    ('point_y', 'f8'),
+                    ('predicted_iou', 'f8'),
+                    ('stability_score', 'f8'),
+                    ('crop_box_x', 'f8'),
+                    ('crop_box_y', 'f8'),
+                    ('crop_box_w', 'f8'),
+                    ('crop_box_h', 'f8')
+                ]
+                
+                metadata_array = np.zeros(len(masks), dtype=mask_fields)
+                for i, mask_data in enumerate(masks):
+                    metadata_array[i] = (
+                        i,
+                        mask_data["area"],
+                        mask_data["bbox"][0],
+                        mask_data["bbox"][1],
+                        mask_data["bbox"][2], 
+                        mask_data["bbox"][3],
+                        mask_data["point_coords"][0][0],
+                        mask_data["point_coords"][0][1],
+                        mask_data["predicted_iou"],
+                        mask_data["stability_score"],
+                        mask_data["crop_box"][0],
+                        mask_data["crop_box"][1],
+                        mask_data["crop_box"][2],
+                        mask_data["crop_box"][3]
+                    )
+            else:
+                segmentations = np.array(masks)
+                # Create minimal metadata for non-dict masks
+                metadata_array = np.zeros(len(masks), dtype=[('id', 'i4')])
+                for i in range(len(masks)):
+                    metadata_array[i] = (i,)
+            
+            # Save segmentation masks
+            seg_dataset = masks_group.create_dataset(
+                'segmentations',
+                data=segmentations.astype(np.uint8),
+                compression='gzip',
+                compression_opts=6
+            )
+            seg_dataset.attrs['num_masks'] = len(masks)
+            seg_dataset.attrs['mask_height'] = segmentations.shape[1]
+            seg_dataset.attrs['mask_width'] = segmentations.shape[2]
+            
+            # Save metadata
+            masks_group.create_dataset(
+                'metadata',
+                data=metadata_array,
+                compression='gzip',
+                compression_opts=6
+            )
+            
+            # === VISUALIZATION GROUP ===
+            if viz_image is not None:
+                viz_group = f.create_group('visualization')
+                viz_array = np.array(viz_image)
+                viz_dataset = viz_group.create_dataset(
+                    'image',
+                    data=viz_array,
+                    compression='gzip',
+                    compression_opts=6
+                )
+                viz_dataset.attrs['height'] = viz_array.shape[0]
+                viz_dataset.attrs['width'] = viz_array.shape[1]
+                viz_dataset.attrs['channels'] = viz_array.shape[2]
+                viz_dataset.attrs['format'] = 'RGBA'
+        
+        print(f"  HDF5 output saved to '{output_file}'")
+        return True
+        
+    except Exception as e:
+        print(f"  Failed to save HDF5 output: {e}")
+        return False
+
+
 def setup_mlflow(args):
     """Setup MLflow tracking if enabled."""
     if not args.mlflow_tracking:
@@ -674,23 +853,9 @@ def main(args: argparse.Namespace) -> None:
             base = os.path.splitext(base)[0]
             save_base = os.path.join(args.output, base)
             
-            # Save masks with timing
-            if tracker:
-                tracker.start_timer("mask_saving")
-            
-            if output_mode == "binary_mask":
-                os.makedirs(save_base, exist_ok=False)
-                write_masks_to_folder(masks, save_base)
-            else:
-                save_file = save_base + ".json"
-                with open(save_file, "w") as f:
-                    json.dump(masks, f)
-            
-            if tracker:
-                tracker.end_timer("mask_saving")
-            
-            # Generate visualization if requested
-            if args.visualize:
+            # Generate visualization for HDF5 output or if explicitly requested
+            viz_image = None
+            if args.hdf5_output or args.visualize:
                 print(f"  Generating visualization...")
                 if tracker:
                     tracker.start_timer("visualization")
@@ -704,17 +869,41 @@ def main(args: argparse.Namespace) -> None:
                         show_contours=not args.no_contours,
                     )
                     
-                    # Save visualization
-                    viz_filename = f"{base}_visualization.png"
-                    viz_path = os.path.join(args.output, viz_filename)
-                    viz_image.save(viz_path)
-                    print(f"  Visualization saved to '{viz_path}'")
+                    # Save standalone visualization if explicitly requested
+                    if args.visualize and not args.hdf5_output:
+                        viz_filename = f"{base}_visualization.png"
+                        viz_path = os.path.join(args.output, viz_filename)
+                        viz_image.save(viz_path)
+                        print(f"  Visualization saved to '{viz_path}'")
                     
                 except Exception as e:
                     print(f"  Failed to generate visualization: {e}")
+                    viz_image = None
                 
                 if tracker:
                     tracker.end_timer("visualization")
+            
+            # Save output with timing
+            if tracker:
+                tracker.start_timer("output_saving")
+            
+            # HDF5 output (comprehensive single file)
+            if args.hdf5_output:
+                performance_data = tracker.get_metrics() if tracker else None
+                write_hdf5_output(image, masks, viz_image, args, t, performance_data)
+            
+            # Traditional output formats
+            if not args.hdf5_output:
+                if output_mode == "binary_mask":
+                    os.makedirs(save_base, exist_ok=False)
+                    write_masks_to_folder(masks, save_base)
+                else:
+                    save_file = save_base + ".json"
+                    with open(save_file, "w") as f:
+                        json.dump(masks, f)
+            
+            if tracker:
+                tracker.end_timer("output_saving")
             
             # Log per-image metrics to MLflow
             if mlflow_enabled and tracker:
