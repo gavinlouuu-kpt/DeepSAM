@@ -17,7 +17,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Add the scripts directory to path to import our utilities
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+scripts_dir = os.path.join(project_root, 'scripts')
+sys.path.append(scripts_dir)
 from sam_hdf5_utils import load_sam_results
 
 
@@ -44,7 +47,7 @@ def run_amg_with_hdf5(image_path, output_dir, model_type="vit_t", device="cuda")
     ]
     
     try:
-        subprocess.run(cmd, check=True, cwd=os.path.dirname(os.path.abspath(__file__)))
+        subprocess.run(cmd, check=True, cwd=scripts_dir)
         print("AMG completed successfully!")
         return True
     except subprocess.CalledProcessError as e:
