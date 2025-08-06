@@ -1,0 +1,83 @@
+#!/bin/bash
+
+# Example usage of the enhanced amg.py script with performance tracking and MLflow integration
+
+echo "=== Mobile SAM Automatic Mask Generation with Performance Tracking ==="
+echo ""
+
+# Basic usage with performance tracking (no MLflow)
+echo "1. Basic performance tracking:"
+echo "python scripts/amg.py \\"
+echo "  --input images/ob_in_cell_1.JPG \\"
+echo "  --output test_output \\"
+echo "  --model-type default \\"
+echo "  --checkpoint weights/mobile_sam.pt \\"
+echo "  --device cuda \\"
+echo "  --track-performance"
+echo ""
+
+# With visualization and detailed tracking
+echo "2. With visualization and detailed tracking (includes contour lines by default):"
+echo "python scripts/amg.py \\"
+echo "  --input images/ \\"
+echo "  --output test_output \\"
+echo "  --device cuda \\"
+echo "  --track-performance \\"
+echo "  --visualize \\"
+echo "  --random-colors"
+echo ""
+
+# Full MLflow integration
+echo "3. Full MLflow integration with contour lines:"
+echo "python scripts/amg.py \\"
+echo "  --input images/ \\"
+echo "  --output test_output \\"
+echo "  --device cuda \\"
+echo "  --track-performance \\"
+echo "  --mlflow-tracking \\"
+echo "  --mlflow-experiment 'mobile_sam_benchmarks' \\"
+echo "  --mlflow-run-name 'performance_test_$(date +%Y%m%d_%H%M%S)' \\"
+echo "  --visualize"
+echo ""
+
+# Without contour lines
+echo "4. Visualization without contour lines:"
+echo "python scripts/amg.py \\"
+echo "  --input images/ \\"
+echo "  --output test_output \\"
+echo "  --visualize \\"
+echo "  --no-contours"
+echo ""
+
+echo "=== MLflow Setup ==="
+echo "To view MLflow results, run:"
+echo "mlflow ui --host 0.0.0.0 --port 5000"
+echo "Then open: http://localhost:5000"
+echo ""
+
+echo "=== Performance Metrics Tracked ==="
+echo "- Model loading time"
+echo "- Per-image inference time"
+echo "- Image loading time"
+echo "- Mask saving time"
+echo "- Visualization generation time (with contour lines by default)"
+echo "- Memory usage (CPU and GPU)"
+echo "- Masks generated per image"
+echo "- Overall throughput (images/sec, masks/sec)"
+echo ""
+
+echo "=== Example Output Metrics ==="
+echo "The script will output detailed timing information like:"
+echo "  Model loaded in 2.1234s"
+echo "  Running inference on 1920x1080 image..."
+echo "  Inference completed in 0.8765s"
+echo "  Generated 142 masks"
+echo ""
+echo "And a final summary:"
+echo "  Total images processed: 5"
+echo "  Total masks generated: 687"
+echo "  Average masks per image: 137.4"
+echo "  Total inference time: 4.2150s"
+echo "  Average inference time per image: 0.8430s"
+echo "  Images per second: 1.19"
+echo "  Masks per second: 163.0" 

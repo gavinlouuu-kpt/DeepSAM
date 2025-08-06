@@ -4,3 +4,4 @@
 __py
 **/__pycache__/
 test_output/
+mlruns/

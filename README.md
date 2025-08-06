@@ -166,8 +166,6 @@ The `scripts/amg.py` script has been enhanced with comprehensive visualization c
 #### Command Line Arguments
 - `--visualize`: Enable visualization image generation with mask overlays
 - `--random-colors`: Use random colors for mask visualization instead of default blue
-- `--with-contours`: Add contour lines around masks in visualization  
-- `--better-quality`: Apply morphological operations to improve mask quality in visualization
 
 #### Usage Examples
 
@@ -181,7 +179,7 @@ python scripts/amg.py \
   --visualize
 ```
 
-**Advanced Visualization with All Features:**
+**Visualization with Random Colors:**
 ```bash
 python scripts/amg.py \
   --input image.jpg \
@@ -190,8 +188,6 @@ python scripts/amg.py \
   --checkpoint weights/mobile_sam.pt \
   --visualize \
   --random-colors \
-  --with-contours \
-  --better-quality \
   --points-per-side 32
 ```
 
@@ -203,8 +199,7 @@ python scripts/amg.py \
   --model-type vit_t \
   --checkpoint weights/mobile_sam.pt \
   --visualize \
-  --random-colors \
-  --with-contours
+  --random-colors
 ```
 
 #### Output Files
@@ -218,8 +213,6 @@ When visualization is enabled, the script generates:
 
 - **Mask Overlay Generation**: Converts segmentation masks to colored overlays with proper transparency
 - **Color Management**: Default semi-transparent blue or random colors for each mask
-- **Contour Detection**: Optional blue contour lines around mask boundaries for better edge visibility
-- **Quality Enhancement**: Optional morphological operations to improve mask quality
 - **GPU Acceleration**: Supports both CPU and GPU processing for optimal performance
 - **Error Handling**: Graceful error handling with informative messages
 

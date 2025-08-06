@@ -15,7 +15,19 @@ from mobile_sam import SamAutomaticMaskGenerator, sam_model_registry
 import argparse
 import json
 import os
+import time
+import psutil
 from typing import Any, Dict, List
+from contextlib import contextmanager
+
+# MLflow imports (optional)
+try:
+    import mlflow
+    import mlflow.pytorch
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    print("MLflow not available. Install with: pip install mlflow")
 
 parser = argparse.ArgumentParser(
     description=(
@@ -45,14 +57,14 @@ parser.add_argument(
 parser.add_argument(
     "--model-type",
     type=str,
-    required=True,
-    help="The type of model to load, in ['default', 'vit_h', 'vit_l', 'vit_b']",
+    default="vit_t",
+    help="The type of model to load, in ['default', 'vit_h', 'vit_l', 'vit_b', 'vit_t']",
 )
 
 parser.add_argument(
     "--checkpoint",
     type=str,
-    required=True,
+    default="weights/mobile_sam.pt",
     help="The path to the SAM checkpoint to use for mask generation.",
 )
 
@@ -83,16 +95,140 @@ visualization_settings.add_argument(
 )
 
 visualization_settings.add_argument(
-    "--with-contours",
+    "--no-contours",
     action="store_true",
-    help="Add contour lines around masks in visualization.",
+    help="Disable contour lines in visualizations (contours are enabled by default when --visualize is used).",
 )
 
-visualization_settings.add_argument(
-    "--better-quality",
+# MLflow tracking options
+tracking_settings = parser.add_argument_group("Tracking Settings")
+
+tracking_settings.add_argument(
+    "--track-performance",
     action="store_true",
-    help="Apply morphological operations to improve mask quality in visualization.",
+    help="Enable detailed performance tracking and logging.",
 )
+
+tracking_settings.add_argument(
+    "--mlflow-tracking",
+    action="store_true",
+    help="Enable MLflow tracking for experiments (requires mlflow).",
+)
+
+tracking_settings.add_argument(
+    "--mlflow-experiment",
+    type=str,
+    default="mobile_sam_inference",
+    help="MLflow experiment name for tracking runs.",
+)
+
+tracking_settings.add_argument(
+    "--mlflow-run-name",
+    type=str,
+    default=None,
+    help="MLflow run name. If not provided, will be auto-generated.",
+)
+
+
+
+@contextmanager
+def timer(name: str, device: str = "cpu"):
+    """Context manager for timing operations with GPU synchronization."""
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    
+    start_time = time.perf_counter()
+    start_memory = psutil.virtual_memory().used / 1024**3  # GB
+    
+    if device == "cuda" and torch.cuda.is_available():
+        start_gpu_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+    else:
+        start_gpu_memory = 0
+    
+    try:
+        yield
+    finally:
+        if device == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        
+        end_time = time.perf_counter()
+        end_memory = psutil.virtual_memory().used / 1024**3  # GB
+        
+        if device == "cuda" and torch.cuda.is_available():
+            end_gpu_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+        else:
+            end_gpu_memory = 0
+        
+        duration = end_time - start_time
+        memory_delta = end_memory - start_memory
+        gpu_memory_delta = end_gpu_memory - start_gpu_memory
+        
+        print(f"{name}: {duration:.4f}s")
+        print(f"  CPU Memory: {memory_delta:+.3f}GB (total: {end_memory:.3f}GB)")
+        if device == "cuda" and torch.cuda.is_available():
+            print(f"  GPU Memory: {gpu_memory_delta:+.3f}GB (total: {end_gpu_memory:.3f}GB)")
+
+
+class PerformanceTracker:
+    """Track performance metrics for inference operations."""
+    
+    def __init__(self, device: str = "cpu"):
+        self.device = device
+        self.metrics = {}
+        self.timings = {}
+        
+    def start_timer(self, name: str):
+        """Start timing an operation."""
+        if self.device == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self.timings[name] = {
+            'start_time': time.perf_counter(),
+            'start_cpu_memory': psutil.virtual_memory().used / 1024**3,
+            'start_gpu_memory': torch.cuda.memory_allocated() / 1024**3 if self.device == "cuda" and torch.cuda.is_available() else 0
+        }
+    
+    def end_timer(self, name: str):
+        """End timing an operation and record metrics."""
+        if name not in self.timings:
+            raise ValueError(f"Timer '{name}' was not started")
+            
+        if self.device == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            
+        timing_info = self.timings[name]
+        end_time = time.perf_counter()
+        end_cpu_memory = psutil.virtual_memory().used / 1024**3
+        end_gpu_memory = torch.cuda.memory_allocated() / 1024**3 if self.device == "cuda" and torch.cuda.is_available() else 0
+        
+        duration = end_time - timing_info['start_time']
+        cpu_memory_delta = end_cpu_memory - timing_info['start_cpu_memory']
+        gpu_memory_delta = end_gpu_memory - timing_info['start_gpu_memory']
+        
+        self.metrics[name] = {
+            'duration_seconds': duration,
+            'cpu_memory_delta_gb': cpu_memory_delta,
+            'gpu_memory_delta_gb': gpu_memory_delta,
+            'final_cpu_memory_gb': end_cpu_memory,
+            'final_gpu_memory_gb': end_gpu_memory
+        }
+        
+        del self.timings[name]
+        return duration
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get all collected metrics."""
+        return self.metrics.copy()
+    
+    def log_metrics(self, prefix: str = ""):
+        """Print all collected metrics."""
+        for name, metrics in self.metrics.items():
+            metric_name = f"{prefix}{name}" if prefix else name
+            print(f"{metric_name}:")
+            print(f"  Duration: {metrics['duration_seconds']:.4f}s")
+            print(f"  CPU Memory Delta: {metrics['cpu_memory_delta_gb']:+.3f}GB")
+            if metrics['gpu_memory_delta_gb'] > 0:
+                print(f"  GPU Memory Delta: {metrics['gpu_memory_delta_gb']:+.3f}GB")
+
 
 amg_settings = parser.add_argument_group("AMG Settings")
 
@@ -272,11 +408,10 @@ def visualize_masks(
     masks,
     device,
     random_color=True,
-    better_quality=False,
-    with_contours=True,
+    show_contours=True,
 ):
     """
-    Create visualization of masks overlaid on the original image.
+    Create visualization of masks overlaid on the original image with optional contour lines.
     """
     if isinstance(masks[0], dict):
         annotations = [mask["segmentation"] for mask in masks]
@@ -284,17 +419,6 @@ def visualize_masks(
         annotations = masks
 
     original_h, original_w = image.shape[:2]
-    
-    if better_quality:
-        if isinstance(annotations[0], torch.Tensor):
-            annotations = np.array(annotations.cpu())
-        for i, mask in enumerate(annotations):
-            mask = cv2.morphologyEx(
-                mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
-            )
-            annotations[i] = cv2.morphologyEx(
-                mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((8, 8), np.uint8)
-            )
     
     if device == "cpu":
         annotations = np.array(annotations)
@@ -325,26 +449,40 @@ def visualize_masks(
     overlay_inner = Image.fromarray((inner_mask * 255).astype(np.uint8), "RGBA")
     pil_image.paste(overlay_inner, (0, 0), overlay_inner)
 
-    if with_contours:
-        contour_all = []
-        temp = np.zeros((original_h, original_w, 1))
-        for i, mask in enumerate(annotations):
-            if type(mask) == dict:
-                mask = mask["segmentation"]
-            annotation = mask.astype(np.uint8)
-            contours, _ = cv2.findContours(
-                annotation, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
-            )
-            for contour in contours:
-                contour_all.append(contour)
-        cv2.drawContours(temp, contour_all, -1, (255, 255, 255), 2)
-        color = np.array([0 / 255, 0 / 255, 255 / 255, 0.9])
-        contour_mask = temp / 255 * color.reshape(1, 1, -1)
-        
-        overlay_contour = Image.fromarray((contour_mask * 255).astype(np.uint8), "RGBA")
-        pil_image.paste(overlay_contour, (0, 0), overlay_contour)
+    # Add contour lines if requested
+    if show_contours:
+        pil_image = add_contour_lines(pil_image, annotations, original_h, original_w)
 
     return pil_image
+
+
+def add_contour_lines(pil_image, annotations, height, width):
+    """
+    Add contour lines around mask boundaries.
+    """
+    # Convert PIL image to numpy for cv2 operations
+    img_array = np.array(pil_image.convert("RGB"))
+    
+    # Process each mask to draw contours
+    for mask in annotations:
+        # Ensure mask is the right size
+        if mask.shape != (height, width):
+            mask = cv2.resize(mask.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST)
+        
+        # Convert to uint8 if needed
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        
+        # Find contours
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Draw contours with white lines for visibility
+        cv2.drawContours(img_array, contours, -1, (255, 255, 255), thickness=2)
+        
+        # Add a thin black outline for better contrast
+        cv2.drawContours(img_array, contours, -1, (0, 0, 0), thickness=1)
+    
+    # Convert back to PIL Image
+    return Image.fromarray(img_array).convert("RGBA")
 
 
 def write_masks_to_folder(masks: List[Dict[str, Any]], path: str) -> None:
@@ -372,6 +510,62 @@ def write_masks_to_folder(masks: List[Dict[str, Any]], path: str) -> None:
     return
 
 
+def setup_mlflow(args):
+    """Setup MLflow tracking if enabled."""
+    if not args.mlflow_tracking:
+        return None
+        
+    if not MLFLOW_AVAILABLE:
+        print("Warning: MLflow tracking requested but MLflow is not installed.")
+        return None
+    
+    # Set experiment
+    mlflow.set_experiment(args.mlflow_experiment)
+    
+    # Start run
+    run_name = args.mlflow_run_name
+    if run_name is None:
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"amg_run_{timestamp}"
+    
+    mlflow.start_run(run_name=run_name)
+    
+    # Log parameters
+    mlflow.log_param("model_type", args.model_type)
+    mlflow.log_param("checkpoint", args.checkpoint)
+    mlflow.log_param("device", args.device)
+    mlflow.log_param("convert_to_rle", args.convert_to_rle)
+    mlflow.log_param("visualize", args.visualize)
+    mlflow.log_param("random_colors", args.random_colors)
+    
+    # Log AMG parameters
+    amg_kwargs = get_amg_kwargs(args)
+    for key, value in amg_kwargs.items():
+        mlflow.log_param(f"amg_{key}", value)
+    
+    return True
+
+
+def log_to_mlflow(metrics: Dict[str, Any], image_info: Dict[str, Any] = None):
+    """Log metrics to MLflow if tracking is enabled."""
+    if not MLFLOW_AVAILABLE or not mlflow.active_run():
+        return
+    
+    # Log timing metrics
+    for metric_name, metric_data in metrics.items():
+        if isinstance(metric_data, dict):
+            for sub_key, value in metric_data.items():
+                mlflow.log_metric(f"{metric_name}_{sub_key}", value)
+        else:
+            mlflow.log_metric(metric_name, metric_data)
+    
+    # Log image information if provided
+    if image_info:
+        for key, value in image_info.items():
+            mlflow.log_metric(f"image_{key}", value)
+
+
 def get_amg_kwargs(args):
     amg_kwargs = {
         "points_per_side": args.points_per_side,
@@ -391,67 +585,190 @@ def get_amg_kwargs(args):
 
 
 def main(args: argparse.Namespace) -> None:
-    print("Loading model...")
-    sam = sam_model_registry[args.model_type](checkpoint=args.checkpoint)
-    _ = sam.to(device=args.device)
-    output_mode = "coco_rle" if args.convert_to_rle else "binary_mask"
-    amg_kwargs = get_amg_kwargs(args)
-    generator = SamAutomaticMaskGenerator(sam, output_mode=output_mode, **amg_kwargs)
-
-    if not os.path.isdir(args.input):
-        targets = [args.input]
-    else:
-        targets = [
-            f for f in os.listdir(args.input) if not os.path.isdir(os.path.join(args.input, f))
-        ]
-        targets = [os.path.join(args.input, f) for f in targets]
-
-    os.makedirs(args.output, exist_ok=True)
-
-    for t in targets:
-        print(f"Processing '{t}'...")
-        image = cv2.imread(t)
-        if image is None:
-            print(f"Could not load '{t}' as an image, skipping...")
-            continue
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        masks = generator.generate(image)
-
-        base = os.path.basename(t)
-        base = os.path.splitext(base)[0]
-        save_base = os.path.join(args.output, base)
+    # Setup MLflow tracking
+    mlflow_enabled = setup_mlflow(args)
+    
+    # Initialize performance tracker
+    tracker = PerformanceTracker(device=args.device) if args.track_performance else None
+    
+    try:
+        # Model loading with timing
+        print("Loading model...")
+        if tracker:
+            tracker.start_timer("model_loading")
         
-        # Save masks in the original format
-        if output_mode == "binary_mask":
-            os.makedirs(save_base, exist_ok=False)
-            write_masks_to_folder(masks, save_base)
+        sam = sam_model_registry[args.model_type](checkpoint=args.checkpoint)
+        _ = sam.to(device=args.device)
+        output_mode = "coco_rle" if args.convert_to_rle else "binary_mask"
+        amg_kwargs = get_amg_kwargs(args)
+        generator = SamAutomaticMaskGenerator(sam, output_mode=output_mode, **amg_kwargs)
+        
+        if tracker:
+            tracker.end_timer("model_loading")
+            print(f"Model loaded in {tracker.metrics['model_loading']['duration_seconds']:.4f}s")
+
+        if not os.path.isdir(args.input):
+            targets = [args.input]
         else:
-            save_file = save_base + ".json"
-            with open(save_file, "w") as f:
-                json.dump(masks, f)
+            targets = [
+                f for f in os.listdir(args.input) if not os.path.isdir(os.path.join(args.input, f))
+            ]
+            targets = [os.path.join(args.input, f) for f in targets]
+
+        os.makedirs(args.output, exist_ok=True)
         
-        # Generate visualization if requested
-        if args.visualize:
-            print(f"Generating visualization for '{t}'...")
-            try:
-                viz_image = visualize_masks(
-                    image,
-                    masks,
-                    args.device,
-                    random_color=args.random_colors,
-                    better_quality=args.better_quality,
-                    with_contours=args.with_contours,
-                )
+        # Track total processing time
+        if tracker:
+            tracker.start_timer("total_processing")
+
+        total_inference_time = 0
+        total_images = 0
+        total_masks = 0
+
+        for t in targets:
+            print(f"Processing '{t}'...")
+            
+            # Image loading with timing
+            if tracker:
+                tracker.start_timer("image_loading")
+            
+            image = cv2.imread(t)
+            if image is None:
+                print(f"Could not load '{t}' as an image, skipping...")
+                continue
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+            if tracker:
+                tracker.end_timer("image_loading")
+            
+            # Get image information
+            image_height, image_width = image.shape[:2]
+            image_info = {
+                "height": image_height,
+                "width": image_width,
+                "total_pixels": image_height * image_width
+            }
+
+            # Main inference with detailed timing
+            print(f"  Running inference on {image_width}x{image_height} image...")
+            
+            if tracker:
+                tracker.start_timer("inference")
+                masks = generator.generate(image)
+                inference_time = tracker.end_timer("inference")
+                total_inference_time += inference_time
+                print(f"  Inference completed in {inference_time:.4f}s")
+            elif args.track_performance:
+                # Simple timing even without full tracking
+                with timer("Inference", args.device):
+                    masks = generator.generate(image)
+            else:
+                masks = generator.generate(image)
+            
+            total_images += 1
+            num_masks = len(masks)
+            total_masks += num_masks
+            print(f"  Generated {num_masks} masks")
+
+            base = os.path.basename(t)
+            base = os.path.splitext(base)[0]
+            save_base = os.path.join(args.output, base)
+            
+            # Save masks with timing
+            if tracker:
+                tracker.start_timer("mask_saving")
+            
+            if output_mode == "binary_mask":
+                os.makedirs(save_base, exist_ok=False)
+                write_masks_to_folder(masks, save_base)
+            else:
+                save_file = save_base + ".json"
+                with open(save_file, "w") as f:
+                    json.dump(masks, f)
+            
+            if tracker:
+                tracker.end_timer("mask_saving")
+            
+            # Generate visualization if requested
+            if args.visualize:
+                print(f"  Generating visualization...")
+                if tracker:
+                    tracker.start_timer("visualization")
                 
-                # Save visualization
-                viz_filename = f"{base}_visualization.png"
-                viz_path = os.path.join(args.output, viz_filename)
-                viz_image.save(viz_path)
-                print(f"Visualization saved to '{viz_path}'")
+                try:
+                    viz_image = visualize_masks(
+                        image,
+                        masks,
+                        args.device,
+                        random_color=args.random_colors,
+                        show_contours=not args.no_contours,
+                    )
+                    
+                    # Save visualization
+                    viz_filename = f"{base}_visualization.png"
+                    viz_path = os.path.join(args.output, viz_filename)
+                    viz_image.save(viz_path)
+                    print(f"  Visualization saved to '{viz_path}'")
+                    
+                except Exception as e:
+                    print(f"  Failed to generate visualization: {e}")
                 
-            except Exception as e:
-                print(f"Failed to generate visualization for '{t}': {e}")
+                if tracker:
+                    tracker.end_timer("visualization")
+            
+            # Log per-image metrics to MLflow
+            if mlflow_enabled and tracker:
+                per_image_metrics = {
+                    f"per_image_{k}": v for k, v in tracker.get_metrics().items()
+                    if k in ["inference", "image_loading", "mask_saving", "visualization"]
+                }
+                per_image_metrics.update({
+                    "masks_generated": num_masks,
+                    "masks_per_second": num_masks / tracker.metrics.get("inference", {}).get("duration_seconds", 1)
+                })
+                log_to_mlflow(per_image_metrics, image_info)
+        
+        # End total processing timer
+        if tracker:
+            tracker.end_timer("total_processing")
+        
+        # Print summary statistics
+        if args.track_performance:
+            print("\n" + "="*50)
+            print("PERFORMANCE SUMMARY")
+            print("="*50)
+            print(f"Total images processed: {total_images}")
+            print(f"Total masks generated: {total_masks}")
+            if total_images > 0:
+                print(f"Average masks per image: {total_masks/total_images:.1f}")
+                if total_inference_time > 0:
+                    print(f"Total inference time: {total_inference_time:.4f}s")
+                    print(f"Average inference time per image: {total_inference_time/total_images:.4f}s")
+                    print(f"Images per second: {total_images/total_inference_time:.2f}")
+                    print(f"Masks per second: {total_masks/total_inference_time:.2f}")
+            
+            if tracker:
+                print("\nDetailed Performance Metrics:")
+                tracker.log_metrics("  ")
+                
+                # Log summary metrics to MLflow
+                if mlflow_enabled:
+                    summary_metrics = {
+                        "total_images": total_images,
+                        "total_masks": total_masks,
+                        "avg_masks_per_image": total_masks/total_images if total_images > 0 else 0,
+                        "total_inference_time": total_inference_time,
+                        "avg_inference_time_per_image": total_inference_time/total_images if total_images > 0 else 0,
+                        "images_per_second": total_images/total_inference_time if total_inference_time > 0 else 0,
+                        "masks_per_second": total_masks/total_inference_time if total_inference_time > 0 else 0
+                    }
+                    summary_metrics.update(tracker.get_metrics())
+                    log_to_mlflow(summary_metrics)
+                
+    finally:
+        # End MLflow run
+        if mlflow_enabled:
+            mlflow.end_run()
                 
     print("Done!")
 
