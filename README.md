@@ -156,6 +156,82 @@ After downloading the model weights, faster SegEvery with MobileSAMv2 can be sim
 cd MobileSAMv2
 bash ./experiments/mobilesamv2.sh
 ```
+
+## Automatic Mask Generation with Visualization
+
+The `scripts/amg.py` script has been enhanced with comprehensive visualization capabilities that allow users to generate overlay images showing detected masks on the original images.
+
+### New Visualization Features
+
+#### Command Line Arguments
+- `--visualize`: Enable visualization image generation with mask overlays
+- `--random-colors`: Use random colors for mask visualization instead of default blue
+- `--with-contours`: Add contour lines around masks in visualization  
+- `--better-quality`: Apply morphological operations to improve mask quality in visualization
+
+#### Usage Examples
+
+**Basic Visualization:**
+```bash
+python scripts/amg.py \
+  --input image.jpg \
+  --output results/ \
+  --model-type vit_t \
+  --checkpoint weights/mobile_sam.pt \
+  --visualize
+```
+
+**Advanced Visualization with All Features:**
+```bash
+python scripts/amg.py \
+  --input image.jpg \
+  --output results/ \
+  --model-type vit_t \
+  --checkpoint weights/mobile_sam.pt \
+  --visualize \
+  --random-colors \
+  --with-contours \
+  --better-quality \
+  --points-per-side 32
+```
+
+**Batch Processing with Visualization:**
+```bash
+python scripts/amg.py \
+  --input images_folder/ \
+  --output results/ \
+  --model-type vit_t \
+  --checkpoint weights/mobile_sam.pt \
+  --visualize \
+  --random-colors \
+  --with-contours
+```
+
+#### Output Files
+
+When visualization is enabled, the script generates:
+
+1. **Original mask outputs**: Individual PNG files or JSON with RLE format (as before)
+2. **Visualization images**: `{filename}_visualization.png` files with mask overlays
+
+#### Visualization Features
+
+- **Mask Overlay Generation**: Converts segmentation masks to colored overlays with proper transparency
+- **Color Management**: Default semi-transparent blue or random colors for each mask
+- **Contour Detection**: Optional blue contour lines around mask boundaries for better edge visibility
+- **Quality Enhancement**: Optional morphological operations to improve mask quality
+- **GPU Acceleration**: Supports both CPU and GPU processing for optimal performance
+- **Error Handling**: Graceful error handling with informative messages
+
+#### Dependencies
+
+The visualization features require:
+- `matplotlib`: For plotting and color management
+- `PIL (Pillow)`: For image manipulation and saving
+- `opencv-python`: For contour detection and morphological operations
+- `numpy`: For array operations
+- `torch`: For GPU acceleration (if available)
+
 ## ONNX Export
 **MobileSAM** now supports ONNX export. Export the model with
 

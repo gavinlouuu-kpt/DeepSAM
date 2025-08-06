@@ -5,6 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import cv2  # type: ignore
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from PIL import Image
 
 from mobile_sam import SamAutomaticMaskGenerator, sam_model_registry
 
@@ -61,6 +65,33 @@ parser.add_argument(
         "Save masks as COCO RLEs in a single json instead of as a folder of PNGs. "
         "Requires pycocotools."
     ),
+)
+
+# Visualization options
+visualization_settings = parser.add_argument_group("Visualization Settings")
+
+visualization_settings.add_argument(
+    "--visualize",
+    action="store_true",
+    help="Generate visualization images with mask overlays.",
+)
+
+visualization_settings.add_argument(
+    "--random-colors",
+    action="store_true",
+    help="Use random colors for mask visualization instead of default blue.",
+)
+
+visualization_settings.add_argument(
+    "--with-contours",
+    action="store_true",
+    help="Add contour lines around masks in visualization.",
+)
+
+visualization_settings.add_argument(
+    "--better-quality",
+    action="store_true",
+    help="Apply morphological operations to improve mask quality in visualization.",
 )
 
 amg_settings = parser.add_argument_group("AMG Settings")
@@ -149,6 +180,173 @@ amg_settings.add_argument(
 )
 
 
+def fast_show_mask(
+    annotation,
+    random_color=False,
+    target_height=960,
+    target_width=960,
+):
+    """
+    CPU-based mask visualization function.
+    """
+    mask_sum = annotation.shape[0]
+    height = annotation.shape[1]
+    weight = annotation.shape[2]
+    # Sort annotation by area
+    areas = np.sum(annotation, axis=(1, 2))
+    sorted_indices = np.argsort(areas)[::1]
+    annotation = annotation[sorted_indices]
+
+    index = (annotation != 0).argmax(axis=0)
+    if random_color == True:
+        color = np.random.random((mask_sum, 1, 1, 3))
+    else:
+        color = np.ones((mask_sum, 1, 1, 3)) * np.array(
+            [30 / 255, 144 / 255, 255 / 255]
+        )
+    transparency = np.ones((mask_sum, 1, 1, 1)) * 0.6
+    visual = np.concatenate([color, transparency], axis=-1)
+    mask_image = np.expand_dims(annotation, -1) * visual
+
+    mask = np.zeros((height, weight, 4))
+
+    h_indices, w_indices = np.meshgrid(
+        np.arange(height), np.arange(weight), indexing="ij"
+    )
+    indices = (index[h_indices, w_indices], h_indices, w_indices, slice(None))
+
+    mask[h_indices, w_indices, :] = mask_image[indices]
+
+    if height != target_height or weight != target_width:
+        mask = cv2.resize(
+            mask, (target_width, target_height), interpolation=cv2.INTER_NEAREST
+        )
+
+    return mask
+
+
+def fast_show_mask_gpu(
+    annotation,
+    random_color=False,
+    target_height=960,
+    target_width=960,
+):
+    """
+    GPU-based mask visualization function.
+    """
+    device = annotation.device
+    mask_sum = annotation.shape[0]
+    height = annotation.shape[1]
+    weight = annotation.shape[2]
+    areas = torch.sum(annotation, dim=(1, 2))
+    sorted_indices = torch.argsort(areas, descending=False)
+    annotation = annotation[sorted_indices]
+    
+    index = (annotation != 0).to(torch.long).argmax(dim=0)
+    if random_color == True:
+        color = torch.rand((mask_sum, 1, 1, 3)).to(device)
+    else:
+        color = torch.ones((mask_sum, 1, 1, 3)).to(device) * torch.tensor(
+            [30 / 255, 144 / 255, 255 / 255]
+        ).to(device)
+    transparency = torch.ones((mask_sum, 1, 1, 1)).to(device) * 0.6
+    visual = torch.cat([color, transparency], dim=-1)
+    mask_image = torch.unsqueeze(annotation, -1) * visual
+    
+    mask = torch.zeros((height, weight, 4)).to(device)
+    h_indices, w_indices = torch.meshgrid(torch.arange(height), torch.arange(weight))
+    indices = (index[h_indices, w_indices], h_indices, w_indices, slice(None))
+    
+    mask[h_indices, w_indices, :] = mask_image[indices]
+    mask_cpu = mask.cpu().numpy()
+    
+    if height != target_height or weight != target_width:
+        mask_cpu = cv2.resize(
+            mask_cpu, (target_width, target_height), interpolation=cv2.INTER_NEAREST
+        )
+    return mask_cpu
+
+
+def visualize_masks(
+    image,
+    masks,
+    device,
+    random_color=True,
+    better_quality=False,
+    with_contours=True,
+):
+    """
+    Create visualization of masks overlaid on the original image.
+    """
+    if isinstance(masks[0], dict):
+        annotations = [mask["segmentation"] for mask in masks]
+    else:
+        annotations = masks
+
+    original_h, original_w = image.shape[:2]
+    
+    if better_quality:
+        if isinstance(annotations[0], torch.Tensor):
+            annotations = np.array(annotations.cpu())
+        for i, mask in enumerate(annotations):
+            mask = cv2.morphologyEx(
+                mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
+            )
+            annotations[i] = cv2.morphologyEx(
+                mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((8, 8), np.uint8)
+            )
+    
+    if device == "cpu":
+        annotations = np.array(annotations)
+        inner_mask = fast_show_mask(
+            annotations,
+            random_color=random_color,
+            target_height=original_h,
+            target_width=original_w,
+        )
+    else:
+        if isinstance(annotations[0], np.ndarray):
+            annotations = np.array(annotations)
+            annotations = torch.from_numpy(annotations)
+        inner_mask = fast_show_mask_gpu(
+            annotations,
+            random_color=random_color,
+            target_height=original_h,
+            target_width=original_w,
+        )
+    
+    if isinstance(annotations, torch.Tensor):
+        annotations = annotations.cpu().numpy()
+
+    # Convert image to PIL Image
+    pil_image = Image.fromarray(image).convert("RGBA")
+    
+    # Create overlay
+    overlay_inner = Image.fromarray((inner_mask * 255).astype(np.uint8), "RGBA")
+    pil_image.paste(overlay_inner, (0, 0), overlay_inner)
+
+    if with_contours:
+        contour_all = []
+        temp = np.zeros((original_h, original_w, 1))
+        for i, mask in enumerate(annotations):
+            if type(mask) == dict:
+                mask = mask["segmentation"]
+            annotation = mask.astype(np.uint8)
+            contours, _ = cv2.findContours(
+                annotation, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for contour in contours:
+                contour_all.append(contour)
+        cv2.drawContours(temp, contour_all, -1, (255, 255, 255), 2)
+        color = np.array([0 / 255, 0 / 255, 255 / 255, 0.9])
+        contour_mask = temp / 255 * color.reshape(1, 1, -1)
+        
+        overlay_contour = Image.fromarray((contour_mask * 255).astype(np.uint8), "RGBA")
+        pil_image.paste(overlay_contour, (0, 0), overlay_contour)
+
+    return pil_image
+
+
 def write_masks_to_folder(masks: List[Dict[str, Any]], path: str) -> None:
     header = "id,area,bbox_x0,bbox_y0,bbox_w,bbox_h,point_input_x,point_input_y,predicted_iou,stability_score,crop_box_x0,crop_box_y0,crop_box_w,crop_box_h"  # noqa
     metadata = [header]
@@ -223,6 +421,8 @@ def main(args: argparse.Namespace) -> None:
         base = os.path.basename(t)
         base = os.path.splitext(base)[0]
         save_base = os.path.join(args.output, base)
+        
+        # Save masks in the original format
         if output_mode == "binary_mask":
             os.makedirs(save_base, exist_ok=False)
             write_masks_to_folder(masks, save_base)
@@ -230,6 +430,29 @@ def main(args: argparse.Namespace) -> None:
             save_file = save_base + ".json"
             with open(save_file, "w") as f:
                 json.dump(masks, f)
+        
+        # Generate visualization if requested
+        if args.visualize:
+            print(f"Generating visualization for '{t}'...")
+            try:
+                viz_image = visualize_masks(
+                    image,
+                    masks,
+                    args.device,
+                    random_color=args.random_colors,
+                    better_quality=args.better_quality,
+                    with_contours=args.with_contours,
+                )
+                
+                # Save visualization
+                viz_filename = f"{base}_visualization.png"
+                viz_path = os.path.join(args.output, viz_filename)
+                viz_image.save(viz_path)
+                print(f"Visualization saved to '{viz_path}'")
+                
+            except Exception as e:
+                print(f"Failed to generate visualization for '{t}': {e}")
+                
     print("Done!")
 
 
