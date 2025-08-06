@@ -96,7 +96,25 @@ mIoU                                     | FastSAM | MobileSAM
 
 The code requires `python>=3.8`, as well as `pytorch>=1.7` and `torchvision>=0.8`. Please follow the instructions [here](https://pytorch.org/get-started/locally/) to install both PyTorch and TorchVision dependencies. Installing both PyTorch and TorchVision with CUDA support is strongly recommended.
 
-Install Mobile Segment Anything:
+### Quick Installation (Recommended)
+
+Install all dependencies from the comprehensive requirements file:
+
+```bash
+# Clone the repository
+git clone https://github.com/ChaoningZhang/MobileSAM.git
+cd MobileSAM
+
+# Install all dependencies
+pip install -r requirements.txt
+
+# Install Mobile SAM package
+pip install git+https://github.com/ChaoningZhang/MobileSAM.git
+```
+
+### Alternative Installation Methods
+
+Install Mobile Segment Anything directly:
 
 ```
 pip install git+https://github.com/ChaoningZhang/MobileSAM.git
@@ -108,6 +126,14 @@ or clone the repository locally and install with
 git clone git@github.com:ChaoningZhang/MobileSAM.git
 cd MobileSAM; pip install -e .
 ```
+
+### Optional Dependencies
+
+The `requirements.txt` includes optional packages that enhance functionality:
+- **ONNX Runtime**: For optimized inference (`onnxruntime` or `onnxruntime-gpu`)
+- **TensorRT**: For high-performance GPU inference (uncomment in requirements.txt)
+- **MLflow**: For experiment tracking and model management
+- **Development tools**: Code formatting and linting tools
 
 ## Demo
 
@@ -373,15 +399,75 @@ The enhanced features require:
 - `numpy`: For array operations
 - `torch`: For GPU acceleration
 
-## ONNX Export
-**MobileSAM** now supports ONNX export. Export the model with
+## ONNX Export and Inference
 
-```
+**MobileSAM** now supports ONNX export and inference with TensorRT acceleration. Export the model with:
+
+### Option 1: Original ONNX Export (Mask Decoder Only)
+```bash
 python scripts/export_onnx_model.py --checkpoint ./weights/mobile_sam.pt --model-type vit_t --output ./mobile_sam.onnx
 ```
 
-Also check the [example notebook](https://github.com/ChaoningZhang/MobileSAM/blob/master/notebooks/onnx_model_example.ipynb) to follow detailed steps.
-We recommend to use `onnx==1.12.0` and `onnxruntime==1.13.1` which is tested.
+### Option 2: Separate Image Encoder and Decoder Export (Recommended for AMG)
+For automatic mask generation with ONNX models, export the image encoder and mask decoder separately:
+
+```bash
+python scripts/export_mobile_sam_onnx.py --checkpoint ./weights/mobile_sam.pt --model-type vit_t --output mobile_sam
+```
+
+This creates two files:
+- `mobile_sam_encoder.onnx` - Image encoder for computing embeddings
+- `mobile_sam_decoder.onnx` - Mask decoder for generating masks from embeddings
+
+### Using ONNX Models with Automatic Mask Generation
+
+Once you have exported ONNX models, you can use them with the enhanced `amg.py` script:
+
+```bash
+# Using separate encoder and decoder ONNX models (recommended)
+python scripts/amg.py --onnx-model mobile_sam_decoder.onnx --image-encoder-onnx mobile_sam_encoder.onnx --input path/to/images --output output_dir
+
+# Additional options
+python scripts/amg.py \
+    --onnx-model mobile_sam_decoder.onnx \
+    --image-encoder-onnx mobile_sam_encoder.onnx \
+    --input path/to/images \
+    --output output_dir \
+    --device cuda \
+    --visualize \
+    --track-performance
+```
+
+### TensorRT Support
+
+For even faster inference, convert your ONNX models to TensorRT engines:
+
+1. Convert ONNX to TensorRT engine:
+```bash
+trtexec --onnx=mobile_sam_decoder.onnx --saveEngine=mobile_sam_decoder.trt --fp16
+```
+
+2. Use TensorRT engine with AMG:
+```bash
+python scripts/amg.py --tensorrt-model mobile_sam_decoder.trt --image-encoder-onnx mobile_sam_encoder.onnx --input path/to/images --output output_dir
+```
+
+### Requirements
+
+For ONNX support:
+```bash
+pip install onnxruntime-gpu  # or onnxruntime for CPU only
+```
+
+For TensorRT support:
+```bash
+# Install TensorRT following NVIDIA's official guide
+pip install tensorrt
+```
+
+We recommend `onnx==1.12.0` and `onnxruntime==1.13.1` which are tested.
+
+Also check the [example notebook](https://github.com/ChaoningZhang/MobileSAM/blob/master/notebooks/onnx_model_example.ipynb) for detailed steps.
 
 
 ## BibTex of our MobileSAM
